@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Skull & Data Overlay Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; background: #050505; }
+        #container { width: 100vw; height: 100vh; }
+        #controls {
+            position: absolute; top: 20px; left: 20px; background: rgba(255, 255, 255, 0.95);
+            padding: 20px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            min-width: 260px; z-index: 100;
+        }
+        #controls h2 { margin: 0 0 15px 0; font-size: 18px; color: #333; border-bottom: 2px solid #ddd; padding-bottom: 5px; }
+        h3 { font-size: 13px; margin: 15px 0 8px 0; color: #0f3460; text-transform: uppercase; }
+        .control-group { margin-bottom: 12px; }
+        .control-group label { display: block; margin-bottom: 5px; font-size: 12px; color: #555; font-weight: 600; }
+        .control-group input[type="range"], .control-group select, .control-group button { width: 100%; }
+        .control-group input[type="color"] { width: 100%; height: 30px; border: none; border-radius: 4px; cursor: pointer; }
+        .control-group button { background: #e94560; color: white; border: none; padding: 10px; font-weight: 600; border-radius: 5px; cursor: pointer; }
+        #footer { position: absolute; bottom: 10px; right: 10px; color: white; font-size: 12px; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 10px; z-index: 1000; }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="loading">Loading 3D Meshes...</div>
+    
+    <div id="controls">
+        <h2>3D Viewer</h2>
+        
+        <h3>Skull</h3>
+        <div class="control-group">
+            <input type="color" id="colorPicker" value="#e8dcc8">
+            <label>Opacity: <span id="opacityValue">0.3</span></label>
+            <input type="range" id="opacitySlider" min="0" max="100" value="30">
+        </div>
+
+        <hr>
+
+        <h3>Acoustic Simulation</h3>
+        <div class="control-group">
+            <input type="color" id="overlayColorPicker" value="#ff0000">
+            <label>Opacity: <span id="overlayOpacityValue">1.0</span></label>
+            <input type="range" id="overlayOpacitySlider" min="0" max="100" value="100">
+        </div>
+
+        <hr>
+        <button id="resetCamera">Reset View</button>
+    </div>
+
+    <div id="footer">Click/Drag to rotate | Right-click to pan | Scroll to zoom</div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        const SKULL_PATH = 'skull.obj';
+        const OVERLAY_PATH = 'kwa.obj';
+
+        let scene, camera, renderer, controls;
+        let mesh, material, overlayMesh, overlayMaterial;
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+            camera.position.set(1000, 1000, 300);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
+            
+            scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+            let dLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dLight.position.set(1, 1, 1);
+            scene.add(dLight);
+            
+            setupOrbitControls();
+            setupUIHandlers();
+            autoLoadFiles();
+            animate();
+        }
+
+        async function autoLoadFiles() {
+            try {
+                const res1 = await fetch(SKULL_PATH);
+                createMesh(parseOBJ(await res1.text()), false);
+                const res2 = await fetch(OVERLAY_PATH);
+                createMesh(parseOBJ(await res2.text()), true);
+                document.getElementById('loading').style.display = 'none';
+            } catch (e) { console.error(e); }
+        }
+
+        function parseOBJ(text) {
+            const vertices = [], faces = [];
+            text.split('\n').forEach(line => {
+                const p = line.trim().split(/\s+/);
+                if (p[0] === 'v') vertices.push(parseFloat(p[1]), parseFloat(p[2]), parseFloat(p[3]));
+                else if (p[0] === 'f') faces.push(parseInt(p[1].split('/')[0])-1, parseInt(p[2].split('/')[0])-1, parseInt(p[3].split('/')[0])-1);
+            });
+            return { vertices, faces };
+        }
+
+        function createMesh(data, isOverlay) {
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(data.vertices), 3));
+            geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(data.faces), 1));
+            geometry.computeVertexNormals();
+
+            const mat = new THREE.MeshPhongMaterial({
+                color: isOverlay ? document.getElementById('overlayColorPicker').value : document.getElementById('colorPicker').value,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: isOverlay ? 1.0 : 0.3,
+
+                // We turn off depthWrite for the Skull (isOverlay = false)
+                // This prevents the skull from blocking the overlay.
+                depthWrite: isOverlay, 
+                depthTest: true
+            });
+
+            const m = new THREE.Mesh(geometry, mat);
+            
+            // Render Overlay (1) then Skull (2)
+            m.renderOrder = isOverlay ? 1 : 2;
+
+            if (isOverlay) {
+                overlayMesh = m; overlayMaterial = mat;
+            } else {
+                mesh = m; material = mat;
+            }
+            scene.add(m);
+        }
+
+        function setupOrbitControls() {
+            let isDragging = false, prevMouse = { x: 0, y: 0 };
+            controls = {
+                rotation: { x: 0.5, y: 0.5 }, distance: 500, target: new THREE.Vector3(100, 100, 100),
+                update: function() {
+                    camera.position.x = this.target.x + this.distance * Math.cos(this.rotation.x) * Math.sin(this.rotation.y);
+                    camera.position.y = this.target.y + this.distance * Math.sin(this.rotation.x);
+                    camera.position.z = this.target.z + this.distance * Math.cos(this.rotation.x) * Math.cos(this.rotation.y);
+                    camera.lookAt(this.target);
+                },
+                pan: function(dx, dy) {
+                    const vecX = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+                    const vecY = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+                    this.target.addScaledVector(vecX, -dx * this.distance * 0.001);
+                    this.target.addScaledVector(vecY, dy * this.distance * 0.001);
+                    this.update();
+                }
+            };
+            renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+            renderer.domElement.addEventListener('mousedown', e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
+            renderer.domElement.addEventListener('mousemove', e => {
+                if (!isDragging) return;
+                const dx = e.clientX - prevMouse.x, dy = e.clientY - prevMouse.y;
+                if (e.buttons === 1) { controls.rotation.y += dx * 0.01; controls.rotation.x += dy * 0.01; }
+                else if (e.buttons === 2) { controls.pan(dx, dy); }
+                controls.update();
+                prevMouse = { x: e.clientX, y: e.clientY };
+            });
+            renderer.domElement.addEventListener('mouseup', () => isDragging = false);
+            renderer.domElement.addEventListener('wheel', e => { e.preventDefault(); controls.distance += e.deltaY * 0.5; controls.update(); });
+            controls.update();
+        }
+
+        function setupUIHandlers() {
+            document.getElementById('colorPicker').addEventListener('input', e => material.color.set(e.target.value));
+            document.getElementById('overlayColorPicker').addEventListener('input', e => overlayMaterial.color.set(e.target.value));
+            document.getElementById('opacitySlider').addEventListener('input', e => {
+                material.opacity = e.target.value / 100;
+                document.getElementById('opacityValue').innerText = (e.target.value / 100).toFixed(1);
+            });
+            document.getElementById('overlayOpacitySlider').addEventListener('input', e => {
+                overlayMaterial.opacity = e.target.value / 100;
+                document.getElementById('overlayOpacityValue').innerText = (e.target.value / 100).toFixed(1);
+            });
+            document.getElementById('resetCamera').addEventListener('click', () => {
+                controls.rotation = {x:0.5, y:0.5}; controls.distance = 500; controls.target.set(100,100,100); controls.update();
+            });
+        }
+
+        function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+        window.addEventListener('resize', () => { camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+        init();
+    </script>
+</body>
+</html>
